@@ -1,49 +1,101 @@
-# CL-213-WF 學習網頁上架腳本
-# 用法：在 PowerShell 中執行 .\deploy.ps1
+# CL-213-WF deploy script
+param(
+    [ValidateSet("netlify", "github")]
+    [string]$Method = "github"
+)
 
 $SiteDir = $PSScriptRoot
 $ZipPath = Join-Path (Split-Path $SiteDir) "cl213-web-deploy.zip"
 
-Write-Host "=== CL-213-WF 學習網頁部署 ===" -ForegroundColor Cyan
-Write-Host ""
-
-# 建立部署用 ZIP
-if (Test-Path $ZipPath) { Remove-Item $ZipPath -Force }
-$tempDir = Join-Path $env:TEMP "cl213-deploy"
-if (Test-Path $tempDir) { Remove-Item $tempDir -Recurse -Force }
-New-Item -ItemType Directory -Path $tempDir | Out-Null
-Copy-Item "$SiteDir\index.html" $tempDir
-Copy-Item "$SiteDir\styles.css" $tempDir
-Copy-Item "$SiteDir\script.js" $tempDir
-Copy-Item "$SiteDir\.nojekyll" $tempDir
-Copy-Item "$SiteDir\assets" "$tempDir\assets" -Recurse
-Compress-Archive -Path "$tempDir\*" -DestinationPath $ZipPath -Force
-Remove-Item $tempDir -Recurse -Force
-Write-Host "[完成] 部署 ZIP：$ZipPath" -ForegroundColor Green
-Write-Host ""
-
-Write-Host "請選擇上架方式：" -ForegroundColor Yellow
-Write-Host ""
-Write-Host "【方式 A】Netlify Drop（最快，約 30 秒）"
-Write-Host "  1. 瀏覽器開啟 https://app.netlify.com/drop"
-Write-Host "  2. 將 ZIP 檔拖曳到頁面中"
-Write-Host "  3. 立即取得網址，例如 https://xxxxx.netlify.app"
-Write-Host ""
-Write-Host "【方式 B】GitHub Pages（永久免費）"
-Write-Host "  1. 到 https://github.com/new 建立新 repository（名稱如 cl213-web）"
-Write-Host "  2. 在本資料夾執行以下指令："
-Write-Host "     git init"
-Write-Host "     git add ."
-Write-Host "     git commit -m `"Add CL-213-WF learning site`""
-Write-Host "     git branch -M main"
-Write-Host "     git remote add origin https://github.com/你的帳號/cl213-web.git"
-Write-Host "     git push -u origin main"
-Write-Host "  3. GitHub repo → Settings → Pages → Source 選 Deploy from branch → main / root"
-Write-Host "  4. 網址：https://你的帳號.github.io/cl213-web/"
-Write-Host ""
-
-$open = Read-Host "是否現在開啟 Netlify Drop 頁面？(Y/N)"
-if ($open -eq 'Y' -or $open -eq 'y') {
-    Start-Process "https://app.netlify.com/drop"
-    Start-Process "explorer.exe" -ArgumentList "/select,`"$ZipPath`""
+function New-DeployZip {
+    if (Test-Path $ZipPath) { Remove-Item $ZipPath -Force }
+    $tempDir = Join-Path $env:TEMP "cl213-deploy"
+    if (Test-Path $tempDir) { Remove-Item $tempDir -Recurse -Force }
+    New-Item -ItemType Directory -Path $tempDir | Out-Null
+    Copy-Item "$SiteDir\index.html", "$SiteDir\styles.css", "$SiteDir\script.js", "$SiteDir\.nojekyll" $tempDir
+    Copy-Item "$SiteDir\assets" "$tempDir\assets" -Recurse
+    Compress-Archive -Path "$tempDir\*" -DestinationPath $ZipPath -Force
+    Remove-Item $tempDir -Recurse -Force
+    return $ZipPath
 }
+
+Write-Host ""
+Write-Host "=== CL-213-WF Deploy ===" -ForegroundColor Cyan
+Write-Host ""
+
+$zip = New-DeployZip
+Write-Host "[OK] ZIP created: $zip" -ForegroundColor Green
+
+if ($Method -eq "netlify") {
+    Write-Host ""
+    Write-Host "Netlify Drop steps:" -ForegroundColor Yellow
+    Write-Host "1. Login at https://app.netlify.com"
+    Write-Host "2. Drag the ZIP file to the Drop zone"
+    Write-Host "3. You will get a URL like https://xxxxx.netlify.app"
+    Write-Host ""
+    Start-Process "https://app.netlify.com/drop"
+    Start-Process explorer.exe -ArgumentList "/select,`"$zip`""
+    exit 0
+}
+
+Set-Location $SiteDir
+
+if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
+    Write-Host "[ERROR] Install GitHub CLI: winget install GitHub.cli" -ForegroundColor Red
+    exit 1
+}
+
+gh auth status 2>&1 | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[LOGIN] Opening browser for GitHub login..." -ForegroundColor Yellow
+    gh auth login --web --git-protocol https
+}
+
+if (-not (Test-Path ".git")) {
+    git init
+    git config user.email "deploy@local"
+    git config user.name "CL213 Deploy"
+}
+
+git add index.html styles.css script.js .nojekyll assets deploy.ps1 deploy.bat
+git diff --cached --quiet
+if ($LASTEXITCODE -ne 0) {
+    git commit -m "Update CL-213-WF learning site"
+}
+git branch -M main
+
+$repoName = "cl213-web"
+Write-Host ""
+Write-Host "[WORKING] Creating GitHub repository..." -ForegroundColor Yellow
+
+gh repo view $repoName 2>&1 | Out-Null
+if ($LASTEXITCODE -eq 0) {
+    $remoteUrl = gh repo view $repoName --json url -q .url
+    Write-Host "Repository exists: $remoteUrl"
+    $hasOrigin = git remote get-url origin 2>$null
+    if (-not $hasOrigin) {
+        $owner = gh api user -q .login
+        git remote add origin "https://github.com/$owner/$repoName.git"
+    }
+    git push -u origin main
+} else {
+    gh repo create $repoName --public --source=. --remote=origin --push
+}
+
+$owner = gh api user -q .login
+Write-Host ""
+Write-Host "[WORKING] Enabling GitHub Pages..." -ForegroundColor Yellow
+gh api -X POST "/repos/$owner/$repoName/pages" -f build_type=legacy -f "source[branch]=main" -f "source[path]=/" 2>$null
+
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "Enable Pages manually: Settings > Pages > main / root" -ForegroundColor Yellow
+}
+
+$pagesUrl = "https://$owner.github.io/$repoName/"
+Write-Host ""
+Write-Host "========================================" -ForegroundColor Green
+Write-Host " Site URL (live in 1-2 minutes):" -ForegroundColor Green
+Write-Host " $pagesUrl" -ForegroundColor White
+Write-Host "========================================" -ForegroundColor Green
+Write-Host ""
+Start-Process $pagesUrl
